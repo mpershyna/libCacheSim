@@ -6,9 +6,12 @@ class FifoCache:
     def __init__(self, cache_size: int):
         self.queue = deque()
         self.cache_size = cache_size
+        self.hand = cache_size - 1
+        self.tracker_array = [0] * cache_size
 
     def on_hit(self, req: Request):
-        pass  # FIFO doesn't reorder on hit
+        index_visited = self.queue.index(req.obj_id)
+        self.tracker_array[index_visited] = 1
 
     def on_miss(self, req: Request):
         if req.obj_size <= self.cache_size:
@@ -17,10 +20,13 @@ class FifoCache:
     def evict(self, req: Request):
         if not self.queue:
             return 0
-        idx = random.randrange(len(self.queue))
-        self.queue.rotate(-idx)
+        hand = self.hand
+        while self.tracker_array[hand] == 1:
+            self.tracker_array[hand] = 0
+            hand = hand - 1
+        self.queue.rotate(-hand)
         victim = self.queue.popleft()
-        self.queue.rotate(idx)
+        self.queue.rotate(hand)
 
         return victim
 
