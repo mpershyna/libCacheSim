@@ -7,7 +7,7 @@ class FifoCache:
     def __init__(self, cache_size: int):
         self.queue = deque()
         self.cache_size = cache_size
-        self.hand = -1
+        self.hand = 0
         self.tracker_array = []
 
     def on_hit(self, req: Request):
@@ -17,23 +17,26 @@ class FifoCache:
     def on_miss(self, req: Request):
         if req.obj_size <= self.cache_size:
             self.queue.append(req.obj_id)
-            self.tracker_array.insert(0, 0)
+            self.tracker_array.append(0)
 
     def evict(self, req: Request):
         if not self.queue:
             return 0
         hand = self.hand
+        if hand > len(self.queue) - 1:
+            hand = 0
         while self.tracker_array[hand] == 1:
             self.tracker_array[hand] = 0
-            hand = int(math.fmod(hand - 1, len(self.queue)))
+            hand = (hand + 1) % len(self.queue)
         victim = self.queue[hand]
         self.queue.remove(victim)
+        self.tracker_array.pop(hand)
         self.hand = hand
         return victim
 
     def on_remove(self, obj_id: int):
         try:
-           index_removed = self.queue.index(req.obj_id) 
+           index_removed = self.queue.index(obj_id) 
            self.queue.remove(obj_id)
            self.tracker_array.pop(index_removed)
         except ValueError:
