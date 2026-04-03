@@ -1,13 +1,14 @@
 from collections import deque
 from libcachesim import CommonCacheParams, Request
 import random
+import math
 
 class FifoCache:
     def __init__(self, cache_size: int):
         self.queue = deque()
         self.cache_size = cache_size
-        self.hand = cache_size - 1
-        self.tracker_array = [0] * cache_size
+        self.hand = -1
+        self.tracker_array = []
 
     def on_hit(self, req: Request):
         index_visited = self.queue.index(req.obj_id)
@@ -16,6 +17,7 @@ class FifoCache:
     def on_miss(self, req: Request):
         if req.obj_size <= self.cache_size:
             self.queue.append(req.obj_id)
+            self.tracker_array.insert(0, 0)
 
     def evict(self, req: Request):
         if not self.queue:
@@ -23,16 +25,17 @@ class FifoCache:
         hand = self.hand
         while self.tracker_array[hand] == 1:
             self.tracker_array[hand] = 0
-            hand = hand - 1
-        self.queue.rotate(-hand)
-        victim = self.queue.popleft()
-        self.queue.rotate(hand)
-
+            hand = int(math.fmod(hand - 1, len(self.queue)))
+        victim = self.queue[hand]
+        self.queue.remove(victim)
+        self.hand = hand
         return victim
 
     def on_remove(self, obj_id: int):
         try:
-            self.queue.remove(obj_id)
+           index_removed = self.queue.index(req.obj_id) 
+           self.queue.remove(obj_id)
+           self.tracker_array.pop(index_removed)
         except ValueError:
             pass  # Object not in queue
 
