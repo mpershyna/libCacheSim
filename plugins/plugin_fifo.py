@@ -26,27 +26,27 @@ class FifoCache:
             pass  # Object not in queue
 
 
-def cache_init_hook(common_cache_params: CommonCacheParams):
+def init_hook(common_cache_params: CommonCacheParams):
     return FifoCache(common_cache_params.cache_size)
 
 
-def cache_hit_hook(data: FifoCache, req: Request):
+def hit_hook(data: FifoCache, req: Request):
     data.on_hit(req)
 
 
-def cache_miss_hook(data: FifoCache, req: Request):
+def miss_hook(data: FifoCache, req: Request):
     data.on_miss(req)
 
 
-def cache_eviction_hook(data: FifoCache, req: Request):
+def eviction_hook(data: FifoCache, req: Request):
     return data.evict(req)
 
 
-def cache_remove_hook(data: FifoCache, obj_id: int):
+def remove_hook(data: FifoCache, obj_id: int):
     data.on_remove(obj_id)
 
 
-def cache_free_hook(data: FifoCache):
+def free_hook(data: FifoCache):
     data.queue.clear()
 
 if __name__ == "__main__":
@@ -55,12 +55,12 @@ if __name__ == "__main__":
 
     plugin_fifo_cache = PluginCache(
         cache_size=1024 * 1024,  # 1 MB
-        cache_init_hook=cache_init_hook,
-        cache_hit_hook=cache_hit_hook,
-        cache_miss_hook=cache_miss_hook,
-        cache_eviction_hook=cache_eviction_hook,
-        cache_remove_hook=cache_remove_hook,
-        cache_free_hook=cache_free_hook,
+        init_hook=init_hook,
+        hit_hook=hit_hook,
+        miss_hook=miss_hook,
+        eviction_hook=eviction_hook,
+        remove_hook=remove_hook,
+        free_hook=free_hook,
         cache_name="fifo",
     )
 
