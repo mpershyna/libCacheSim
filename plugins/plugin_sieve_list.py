@@ -7,8 +7,10 @@ class FifoCache:
     def __init__(self, cache_size: int):
         self.queue = []
         self.cache_size = cache_size
+        self.used_bytes = 0
         self.hand = 0
         self.tracker_array = []
+        self.obj_sizes = {}
 
     def on_hit(self, req: Request):
         index_visited = self.queue.index(req.obj_id)
@@ -18,6 +20,8 @@ class FifoCache:
         if req.obj_size <= self.cache_size:
             self.queue.append(req.obj_id)
             self.tracker_array.append(0)
+            self.obj_sizes[req.obj_id] = req.obj_size
+            self.used_bytes += req.obj_size
 
     def evict(self, req: Request):
         if not self.queue:
@@ -31,6 +35,10 @@ class FifoCache:
             hand = (hand + 1) % length
         victim = self.queue.pop(hand)
         self.tracker_array.pop(hand)
+        victim_size = self.obj_sizes.pop(victim, 0)
+        self.used_bytes -= victim_size
+        if hand >= len(self.queue) and self.queue:
+            hand = 0
         self.hand = hand
         return victim
 
@@ -39,6 +47,17 @@ class FifoCache:
            index_removed = self.queue.index(obj_id) 
            self.queue.pop(index_removed)
            self.tracker_array.pop(index_removed)
+
+           removed_size = self.obj_sizes.pop(obj_id, 0)
+           self.used_bytes -= removed_size
+
+           if self.hand > index_removed:
+               self.hand -= 1
+           elif self.hand >= len(self.queue) and self.queue:
+               self.hand = 0
+           elif not self.queue:
+               self.hand = 0
+
         except ValueError:
             pass  # Object not in queue
 
@@ -56,8 +75,12 @@ def cache_miss_hook(data: FifoCache, req: Request):
 
 
 def cache_eviction_hook(data: FifoCache, req: Request):
+    #while data.used_bytes + req.obj_size > data.cache_size:
+    #    victim = data.evict(req)
+    #    if victim == 0:
+    #        break
+    #return victim if 'victim' in locals() else 0
     return data.evict(req)
-
 
 def cache_remove_hook(data: FifoCache, obj_id: int):
     data.on_remove(obj_id)
@@ -65,6 +88,9 @@ def cache_remove_hook(data: FifoCache, obj_id: int):
 
 def cache_free_hook(data: FifoCache):
     data.queue.clear()
+    data.tracker_array.clear()
+    data.obj_sizes.clear()
+    data.used_bytes = 0
 
 if __name__ == "__main__":
     from pathlib import Path
