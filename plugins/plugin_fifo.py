@@ -29,7 +29,11 @@ class FifoCache:
             self.tracker_array[hand] = 0
             hand = (hand + 1) % len(self.queue)
         victim = self.queue[hand]
-        self.queue.remove(victim)
+        
+        self.queue.rotate(-hand) 
+        victim = self.queue.popleft() 
+        self.queue.rotate(hand)
+
         self.tracker_array.pop(hand)
         self.hand = hand
         return victim
