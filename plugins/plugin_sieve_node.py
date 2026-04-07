@@ -1,133 +1,147 @@
+from typing import Optional
+
 from libcachesim import CommonCacheParams, Request
 
-class Node:
-    __slots__ = ("obj_id", "size", "ref", "prev", "next")
 
-    def __init__(self, obj_id: int, size: int):
+class Node:
+    __slots__ = ("obj_id", "obj_size", "visited", "prev", "next")
+
+    def __init__(self, obj_id: int, obj_size: int):
         self.obj_id = obj_id
-        self.size = size
-        self.ref = 0
-        self.prev = None
-        self.next = None
+        self.obj_size = obj_size
+        self.visited = False
+        self.prev: Optional["Node"] = None  # newer object, toward head
+        self.next: Optional["Node"] = None  # older object, toward tail
 
 
 class SieveCache:
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
-        self.current_size = 0
-        self.nodes = {}   # obj_id -> Node
-        self.head = None
-        self.tail = None
-        self.hand = None
-        self.ghost = set()
+        self.used_bytes = 0
+        self.nodes: dict[int, Node] = {}
+        self.head: Optional[Node] = None  # newest object
+        self.tail: Optional[Node] = None  # oldest object
+        self.hand: Optional[Node] = None  # next eviction candidate
 
-    def _append(self, node: Node):
-        if self.tail is None:
-            self.head = self.tail = node
-            node.prev = node.next = node
-            self.hand = node
-        else:
-            node.prev = self.tail
-            node.next = self.head
-            self.tail.next = node
+    def _insert_at_head(self, node: Node) -> None:
+        node.prev = None
+        node.next = self.head
+        if self.head is not None:
             self.head.prev = node
-            self.tail = node
-
-    def _remove_node(self, node: Node):
-        if node.next is node:  # single-node list
-            self.head = self.tail = self.hand = None
         else:
+            self.tail = node
+        self.head = node
+
+    def _unlink(self, node: Node) -> None:
+        if node.prev is not None:
             node.prev.next = node.next
+        else:
+            self.head = node.next
+
+        if node.next is not None:
             node.next.prev = node.prev
-            if self.head is node:
-                self.head = node.next
-            if self.tail is node:
-                self.tail = node.prev
-            if self.hand is node:
-                self.hand = node.next
+        else:
+            self.tail = node.prev
 
-        self.current_size -= node.size
-        del self.nodes[node.obj_id]
+        node.prev = None
+        node.next = None
 
-    def on_hit(self, req: Request):
+    def _step_hand(self, node: Node) -> Optional[Node]:
+        if node.prev is not None:
+            return node.prev
+        return self.tail
+
+    def on_hit(self, req: Request) -> None:
         node = self.nodes.get(req.obj_id)
         if node is not None:
-            node.ref = 1
+            node.visited = True
 
-    def _evict_one(self):
-        if self.hand is None:
-            return None
-
-        while True:
-            node = self.hand
-            if node.ref == 0:
-                victim_id = node.obj_id
-                self._remove_node(node)
-                return victim_id
-            node.ref = 0
-            self.hand = node.next
-
-    def on_miss(self, req: Request):
-        size = req.obj_size
-
-        # Never admit objects larger than the whole cache
-        if size > self.cache_size / 4:
+    def on_miss(self, req: Request) -> None:
+        if req.obj_size > self.cache_size or req.obj_id in self.nodes:
             return
 
-        if req.obj_id not in self.ghost:
-            self.ghost.add(req.obj_id)
-            return
-
-        # Already present: ignore duplicate insert
-        if req.obj_id in self.nodes:
-            return
-
-        # Evict until the object fits
-        while self.current_size + size > self.cache_size:
-            if self._evict_one() is None:
-                break
-
-        node = Node(req.obj_id, size)
-        self._append(node)
+        node = Node(req.obj_id, req.obj_size)
         self.nodes[req.obj_id] = node
-        self.current_size += size
+        self._insert_at_head(node)
+        self.used_bytes += req.obj_size
 
-    def evict(self, req: Request):
-        return self._evict_one()
+        if self.hand is None:
+            self.hand = self.tail
 
-    def on_remove(self, obj_id: int):
-        node = self.nodes.get(obj_id)
-        if node is not None:
-            self._remove_node(node)
+    def evict(self, _: Request) -> int:
+        if not self.nodes:
+            return 0
 
-    def free(self):
-        self.nodes.clear()
-        self.head = self.tail = self.hand = None
-        self.current_size = 0
+        if self.hand is None:
+            self.hand = self.tail
+
+        while self.hand is not None and self.hand.visited:
+            self.hand.visited = False
+            self.hand = self._step_hand(self.hand)
+
+        victim = self.hand
+        if victim is None:
+            return 0
+
+        next_candidate = victim.prev
+        self._unlink(victim)
+        self.nodes.pop(victim.obj_id, None)
+        self.used_bytes -= victim.obj_size
+
+        if not self.nodes:
+            self.hand = None
+        elif next_candidate is not None:
+            self.hand = next_candidate
+        else:
+            self.hand = self.tail
+
+        return victim.obj_id
+
+    def on_remove(self, obj_id: int) -> None:
+        node = self.nodes.pop(obj_id, None)
+        if node is None:
+            return
+
+        hand_was_node = self.hand is node
+        next_candidate = node.prev
+        self._unlink(node)
+        self.used_bytes -= node.obj_size
+
+        if not self.nodes:
+            self.hand = None
+        elif hand_was_node:
+            if next_candidate is not None:
+                self.hand = next_candidate
+            else:
+                self.hand = self.tail
 
 
-def cache_init_hook(common_cache_params: CommonCacheParams):
+def cache_init_hook(common_cache_params: CommonCacheParams) -> SieveCache:
     return SieveCache(common_cache_params.cache_size)
 
 
-def cache_hit_hook(data: SieveCache, req: Request):
+def cache_hit_hook(data: SieveCache, req: Request) -> None:
     data.on_hit(req)
 
 
-def cache_miss_hook(data: SieveCache, req: Request):
+def cache_miss_hook(data: SieveCache, req: Request) -> None:
     data.on_miss(req)
 
 
-def cache_eviction_hook(data: SieveCache, req: Request):
+def cache_eviction_hook(data: SieveCache, req: Request) -> int:
     return data.evict(req)
 
 
-def cache_remove_hook(data: SieveCache, obj_id: int):
+def cache_remove_hook(data: SieveCache, obj_id: int) -> None:
     data.on_remove(obj_id)
 
 
-def cache_free_hook(data: SieveCache):
-    data.free()
+def cache_free_hook(data: SieveCache) -> None:
+    data.nodes.clear()
+    data.head = None
+    data.tail = None
+    data.hand = None
+    data.used_bytes = 0
 
 if __name__ == "__main__":
     from pathlib import Path
