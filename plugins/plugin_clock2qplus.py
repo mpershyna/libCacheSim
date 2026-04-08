@@ -1,4 +1,4 @@
-from collections import deque
+from collections import OrderedDict
 from typing import Optional
 
 from libcachesim import CommonCacheParams, PluginCache, Request
@@ -102,23 +102,62 @@ class ClockQueue(LinkedQueue):
 
 
 class CorrelationFIFOQueue(LinkedQueue):
-    def __init__(self, name: str, cache_size: int, correlation_window_ratio: float):
+    def __init__(self, name: str, cache_size: int, correlation_window_bytes: int):
         super().__init__(name, cache_size)
-        self.correlation_window_ratio = correlation_window_ratio
-        if correlation_window_ratio == 0:
-            self.correlation_window_bytes = 0
-        else:
-            self.correlation_window_bytes = max(1, int(cache_size * correlation_window_ratio))
+        self.correlation_window_bytes = correlation_window_bytes
+        self.window_tail: Optional[Node] = None
+        self.window_used_bytes = 0
 
     def insert(self, node: Node) -> Node:
         super().insert(node)
         node.referenced = False
-        self._recompute_correlation_window()
+        node.in_correlation_window = False
+
+        if self.correlation_window_bytes <= 0:
+            return node
+
+        node.in_correlation_window = True
+        if self.window_tail is None:
+            self.window_tail = node
+        self.window_used_bytes += node.obj_size
+
+        while self.window_used_bytes > self.correlation_window_bytes and self.window_tail is not None:
+            old_tail = self.window_tail
+            old_tail.in_correlation_window = False
+            self.window_used_bytes -= old_tail.obj_size
+            self.window_tail = old_tail.prev
         return node
 
     def remove(self, node: Node) -> bool:
+        was_in_window = node.in_correlation_window
+        next_candidate = None
+
+        if was_in_window:
+            self.window_used_bytes -= node.obj_size
+            if self.window_tail is node:
+                next_candidate = node.next
+                self.window_tail = node.prev
+            else:
+                next_candidate = self.window_tail.next if self.window_tail is not None else None
+
         super().remove(node)
-        self._recompute_correlation_window()
+        node.in_correlation_window = False
+
+        if not was_in_window or self.correlation_window_bytes <= 0:
+            return True
+
+        if self.window_tail is None:
+            next_candidate = self.head if next_candidate is None else next_candidate
+
+        while (
+            next_candidate is not None
+            and self.window_used_bytes + next_candidate.obj_size <= self.correlation_window_bytes
+        ):
+            next_candidate.in_correlation_window = True
+            self.window_used_bytes += next_candidate.obj_size
+            self.window_tail = next_candidate
+            next_candidate = next_candidate.next
+
         return True
 
     def pop_oldest(self) -> Optional[Node]:
@@ -133,24 +172,13 @@ class CorrelationFIFOQueue(LinkedQueue):
         if not node.in_correlation_window:
             node.referenced = True
 
-    def _recompute_correlation_window(self) -> None:
-        node = self.head
-        used = 0
-        while node is not None:
-            if used + node.obj_size <= self.correlation_window_bytes:
-                node.in_correlation_window = True
-                used += node.obj_size
-            else:
-                node.in_correlation_window = False
-            node = node.next
-
 
 class Clock2QPlus:
     def __init__(
         self,
         small_cache_ratio: float = 0.1,
         ghost_cache_ratio: float = 0.9,
-        correlation_window_ratio: float = 0.5,
+        correlation_window_ratio: float = 0.05,
         cache_size: int = 1024,
     ):
         if cache_size <= 0:
@@ -166,19 +194,21 @@ class Clock2QPlus:
         self.small_queue_size = max(1, int(small_cache_ratio * cache_size))
         self.main_queue_size = cache_size - self.small_queue_size
         self.ghost_queue_size = max(1, int(ghost_cache_ratio * cache_size))
+        if correlation_window_ratio == 0:
+            self.correlation_window_size = 0
+        else:
+            self.correlation_window_size = max(1, int(cache_size * correlation_window_ratio))
 
         self.small_queue = CorrelationFIFOQueue(
             "small",
             self.small_queue_size,
-            correlation_window_ratio=correlation_window_ratio,
+            correlation_window_bytes=self.correlation_window_size,
         )
         self.main_queue = ClockQueue("main", self.main_queue_size)
 
         self.index: dict[int, Node] = {}
-        self.obj_sizes: dict[int, int] = {}
 
-        self.ghost_fifo: deque[int] = deque()
-        self.ghost_sizes: dict[int, int] = {}
+        self.ghost_entries: OrderedDict[int, int] = OrderedDict()
         self.ghost_used_bytes = 0
 
         self.pending_eviction = False
@@ -189,7 +219,6 @@ class Clock2QPlus:
         if node is None:
             return
 
-        self.obj_sizes[req.obj_id] = req.obj_size
         if node.queue_name == "small":
             self.small_queue.record_hit(node)
         else:
@@ -201,7 +230,6 @@ class Clock2QPlus:
             self.pending_ghost_hit = False
             return
 
-        self.obj_sizes[req.obj_id] = req.obj_size
         self._mark_pending_ghost_hit(req.obj_id)
 
         if self.pending_ghost_hit:
@@ -230,15 +258,13 @@ class Clock2QPlus:
                 return None
 
             evicted_id = victim.obj_id
-            obj_size = self.obj_sizes.get(evicted_id, victim.obj_size)
+            obj_size = victim.obj_size
 
             if victim.referenced:
-                victim.obj_size = obj_size
                 victim.referenced = False
                 self.main_queue.insert(victim)
             else:
                 self.index.pop(evicted_id, None)
-                self.obj_sizes.pop(evicted_id, None)
                 self._add_ghost(evicted_id, obj_size)
                 return evicted_id
 
@@ -251,14 +277,12 @@ class Clock2QPlus:
 
         evicted_id = victim.obj_id
         self.index.pop(evicted_id, None)
-        self.obj_sizes.pop(evicted_id, None)
         return evicted_id
 
     def cache_evict(self, req: Request) -> Optional[int]:
         if req.obj_size > self.cache_size:
             return 0
 
-        self.obj_sizes[req.obj_id] = req.obj_size
         self._mark_pending_ghost_hit(req.obj_id)
         self.pending_eviction = True
 
@@ -273,48 +297,42 @@ class Clock2QPlus:
         if node is not None:
             queue = self.small_queue if node.queue_name == "small" else self.main_queue
             queue.remove(node)
-            self.obj_sizes.pop(obj_id, None)
             return True
 
         removed = self._remove_ghost(obj_id)
-        self.obj_sizes.pop(obj_id, None)
         return removed
 
     def clear(self) -> None:
         self.index.clear()
-        self.obj_sizes.clear()
         self.small_queue = CorrelationFIFOQueue(
             "small",
             self.small_queue_size,
-            correlation_window_ratio=self.small_queue.correlation_window_ratio,
+            correlation_window_bytes=self.correlation_window_size,
         )
         self.main_queue = ClockQueue("main", self.main_queue_size)
-        self.ghost_fifo.clear()
-        self.ghost_sizes.clear()
+        self.ghost_entries.clear()
         self.ghost_used_bytes = 0
         self.pending_eviction = False
         self.pending_ghost_hit = False
 
     def _mark_pending_ghost_hit(self, obj_id: int) -> None:
-        if not self.pending_ghost_hit and obj_id in self.ghost_sizes:
+        if not self.pending_ghost_hit and obj_id in self.ghost_entries:
             self.pending_ghost_hit = True
             self._remove_ghost(obj_id)
 
     def _add_ghost(self, obj_id: int, obj_size: int) -> None:
-        if obj_id in self.ghost_sizes:
+        if obj_id in self.ghost_entries:
             self._remove_ghost(obj_id)
 
-        self.ghost_fifo.append(obj_id)
-        self.ghost_sizes[obj_id] = obj_size
+        self.ghost_entries[obj_id] = obj_size
         self.ghost_used_bytes += obj_size
 
-        while self.ghost_used_bytes > self.ghost_queue_size and self.ghost_fifo:
-            old_obj_id = self.ghost_fifo.popleft()
-            old_size = self.ghost_sizes.pop(old_obj_id, 0)
+        while self.ghost_used_bytes > self.ghost_queue_size and self.ghost_entries:
+            _, old_size = self.ghost_entries.popitem(last=False)
             self.ghost_used_bytes -= old_size
 
     def _remove_ghost(self, obj_id: int) -> bool:
-        old_size = self.ghost_sizes.pop(obj_id, None)
+        old_size = self.ghost_entries.pop(obj_id, None)
         if old_size is None:
             return False
 
@@ -325,8 +343,8 @@ class Clock2QPlus:
 def make_clock2q_plus_plugin(
     cache_size: int,
     small_cache_ratio: float = 0.1,
-    ghost_cache_ratio: float = 0.9,
-    correlation_window_ratio: float = 0.5,
+    ghost_cache_ratio: float = 0.5,
+    correlation_window_ratio: float = 0.05,
     cache_name: str = "clock2q_plus",
 ) -> PluginCache:
     def init_hook(common_cache_params: CommonCacheParams) -> Clock2QPlus:
@@ -350,8 +368,8 @@ def make_clock2q_plus_plugin(
 
 
 DEFAULT_SMALL_CACHE_RATIO = 0.1
-DEFAULT_GHOST_CACHE_RATIO = 0.9
-DEFAULT_CORRELATION_WINDOW_RATIO = 0.5
+DEFAULT_GHOST_CACHE_RATIO = 0.5
+DEFAULT_CORRELATION_WINDOW_RATIO = 0.05
 
 
 def cache_init_hook(common_cache_params: CommonCacheParams) -> Clock2QPlus:
@@ -384,6 +402,7 @@ def cache_remove_hook(cache: Clock2QPlus, obj_id: int) -> bool:
 
 def cache_free_hook(cache: Clock2QPlus) -> None:
     cache.clear()
+
 
 if __name__ == "__main__":
     from pathlib import Path
