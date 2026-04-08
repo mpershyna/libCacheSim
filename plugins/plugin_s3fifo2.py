@@ -195,61 +195,22 @@ def cache_free_hook(cache):
 
 if __name__ == "__main__":
     from pathlib import Path
-    from libcachesim import PluginCache, TraceReader, TraceType, ReaderInitParam
+    from libcachesim import PluginCache, TraceReader, TraceType
 
-    def build_cache(cache_size: int) -> PluginCache:
-        return PluginCache(
-        cache_size=cache_size,
+    plugin_s3fifo_cache = PluginCache(
+        cache_size=1024 * 1024,  # 1 MB
         cache_init_hook=cache_init_hook,
         cache_hit_hook=cache_hit_hook,
         cache_miss_hook=cache_miss_hook,
         cache_eviction_hook=cache_eviction_hook,
         cache_remove_hook=cache_remove_hook,
         cache_free_hook=cache_free_hook,
-        cache_name="sieve",
-        )
+        cache_name="s3fifo",
+    )
 
-    def make_reader(trace):
-        trace = str(trace)
+    trace = Path(__file__).parent.parent / "data" / "cloudPhysicsIO.vscsi"
+    reader = TraceReader(trace=str(trace), trace_type=TraceType.VSCSI_TRACE)
 
-        if trace.endswith(".vscsi"):
-            return TraceReader(trace=trace, trace_type=TraceType.VSCSI_TRACE)
-
-        if trace.endswith(".oracleGeneral") or trace.endswith(".oracleGeneral.zst"):
-            return TraceReader(
-                trace=trace,
-            trace_type=TraceType.ORACLE_GENERAL_TRACE,
-            reader_init_params=ReaderInitParam(ignore_obj_size=False),
-            )
-
-        raise ValueError(
-            f"Unsupported trace format for {trace}. "
-            "Prefer .vscsi or .oracleGeneral(.zst)."
-        )
-
-    def run_one(trace, cache_size=1024 * 1024, start_req=0, max_req=None):
-        reader = make_reader(trace)
-        cache = build_cache(cache_size)
-
-        kwargs = {}
-        if max_req is not None:
-            kwargs["start_req"] = start_req
-            kwargs["max_req"] = max_req
-
-        req_miss_ratio, byte_miss_ratio = cache.process_trace(reader, **kwargs)
-        print(f"{trace}")
-        print(f"  request miss ratio: {req_miss_ratio:.4f}")
-        print(f"  byte miss ratio:    {byte_miss_ratio:.4f}")
- 
-    traces = [
-        Path("data/cloudPhysicsIO.vscsi"),
-        Path("data/twitter_cluster52.oracleGeneral.zst"),
-        Path("data/wiki_trace.oracleGeneral.zst"),
-
-        # Direct S3 also works if your environment can access it.
-        # Replace <actual-file> with a real file from the dataset listing.
-        # "s3://cache-datasets/cache_dataset_oracleGeneral/2020_twitter/<actual-file>.oracleGeneral.zst",
-    ]
-
-    for trace in traces:
-        run_one(trace, cache_size=1024 * 1024, max_req=1_000_000)
+    req_miss_ratio, byte_miss_ratio = plugin_s3fifo_cache.process_trace(reader)
+    print(f"Request miss ratio: {req_miss_ratio:.4f}")
+    print(f"Byte miss ratio: {byte_miss_ratio:.4f}")
